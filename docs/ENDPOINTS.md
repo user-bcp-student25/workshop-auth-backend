@@ -20,7 +20,7 @@ Tipo de contenido: `application/json`
 | --- | --- | --- |
 | `username` | string | Obligatorio; no puede ser nulo ni estar vacio. |
 | `password` | string | Obligatorio; no puede ser nulo ni estar vacio. |
-| `client` | string | Se acepta, pero actualmente no se valida ni se utiliza. El Issue #11 compromete a validarlo e incluirlo en el token. |
+| `client` | string | Obligatorio. Solo se acepta `angular-workshop`; un valor ausente, vacio o distinto responde `400 Bad Request` antes de consultar credenciales. |
 
 Ejemplo:
 
@@ -41,7 +41,7 @@ La respuesta contiene `token`, `expiresIn`, `user` y el campo `debug` heredado q
 ```json
 {
   "token": "<opaque-token>",
-  "expiresIn": 3600,
+  "expiresIn": 3599,
   "user": {
     "username": "student",
     "displayName": "Workshop Student",
@@ -51,13 +51,17 @@ La respuesta contiene `token`, `expiresIn`, `user` y el campo `debug` heredado q
 }
 ```
 
-`expiresIn` se expresa en segundos. El token actual utiliza un formato heredado y no constituye un contrato JWT; los clientes deben tratarlo como opaco. El valor de `displayName` se escapa como HTML antes de devolverse.
+`token` es un JWT firmado con HS256 y se debe tratar como opaco. Incluye los claims `sub` (usuario), `client`, `iat` y `exp`, en segundos desde epoch. `expiresIn` expresa los segundos restantes y puede diferir de `exp - now` como maximo en un segundo. El valor de `displayName` se escapa como HTML antes de devolverse.
+
+### Secreto de firma
+
+`AUTH_TOKEN_SECRET` es una configuración sensible que debe proporcionarse externamente fuera del perfil de pruebas. No existe un secreto de producción predeterminado en el código. El valor `%test.auth.token.secret` de `application.properties` es una clave ficticia, exclusiva del sandbox de pruebas, y no debe reutilizarse fuera de él.
 
 ### Respuestas de error
 
 | Estado | Condicion | Estructura del cuerpo |
 | --- | --- | --- |
-| `400 Bad Request` | Solicitud nula, o `username`/`password` ausente o vacio. | `{ "message": "..." }` |
+| `400 Bad Request` | Solicitud nula, `client` ausente/vacio/no permitido, o `username`/`password` ausente o vacio. | `{ "message": "..." }` |
 | `401 Unauthorized` | Las credenciales no corresponden a un usuario del workshop. | `{ "message": "Invalid user <username> or password" }` |
 | `500 Internal Server Error` | Una excepcion escapa del flujo de login. | `{ "message": "...", "exception": "<exception-class>" }` |
 
@@ -67,8 +71,6 @@ Los mensajes exactos mostrados arriba reflejan la implementacion actual. En part
 
 Endpoint agregado de Quarkus SmallRye Health. Este proyecto no define comprobaciones de salud especificas de la aplicacion. La extension de health genera la respuesta e informa el estado del servicio.
 
-## Issue #11: cambios comprometidos respecto a la linea base
+## Issue #11: cambios respecto a la linea base
 
-[GitHub Issue #11](https://github.com/user-bcp-student25/workshop-auth-backend/issues/11) solicita cambiar el contrato del token de login: un token valido debe incluir `sub`, `client`, `iat` y `exp`; `client` debe obtenerse de la solicitud y validarse; y `expiresIn` debe coincidir con `exp - now` dentro de una tolerancia documentada. Tambien requiere pruebas de login exitoso, credenciales invalidas y tokens expirados, documentacion de `AUTH_TOKEN_SECRET`, logs redactados y una decision registrada sobre HMAC frente a una biblioteca JWT.
-
-Estos son requisitos objetivo, no el comportamiento actual. La solicitud ya acepta `client`, pero lo ignora; el token actual no cumple el contrato de claims requerido y la respuesta utiliza un `expiresIn` fijo de 3600 segundos. El issue no solicita cambiar la ruta de login ni los campos existentes de la respuesta `user`; se preservan como parte del comportamiento actual, salvo que se revise el alcance del issue.
+El flujo actual valida `client=angular-workshop` antes de consultar credenciales y emite un JWT con `sub`, `client`, `iat` y `exp`. `expiresIn` se deriva del mismo instante de expiracion. Se mantienen `POST /auth/login`, las claves `token`, `expiresIn`, `user` y `debug`, los campos `user.username`, `user.displayName` y `user.role`, `401` para credenciales invalidas y `400` para campos obligatorios ausentes o vacios.

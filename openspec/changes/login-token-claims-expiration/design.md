@@ -37,6 +37,8 @@ El flujo actual de `POST /auth/login` acepta `client` pero lo ignora, devuelve u
 
 1. **Usar una biblioteca JWT/JWS mantenida y compatible con Quarkus en lugar del formato Base64 personalizado.** Los claims y la semantica de expiracion requeridos son responsabilidades estandar de los tokens; una biblioteca evita implementar manualmente la firma y validacion criptograficas. Se considero un formato HMAC propio, pero se descarto por el riesgo de errores en la firma, verificacion o manejo de claims. La biblioteca y version compatibles concretas pueden seleccionarse durante la revision de dependencias sin cambiar esta direccion tecnica.
 
+	La revision de dependencias selecciono `com.auth0:java-jwt:4.5.0`. El repositorio usa JWS con HS256 (HMAC-SHA256): se conserva HMAC como algoritmo de firma, pero se sustituye el formato Base64 personalizado por un formato JWT estandar.
+
 2. **Usar un unico instante de expiracion como origen de `exp` y `expiresIn`.** Representar `iat` y `exp` como segundos desde epoch. Derivar `expiresIn` del mismo instante de expiracion y del tiempo actual al construir la respuesta; permitir una diferencia maxima de un segundo, como establece la spec. Esto evita que duraciones configuradas por separado diverjan.
 
 3. **Validar el cliente antes de consultar credenciales y emitir el token.** Aceptar exactamente `angular-workshop`; responder `400 Bad Request` si falta, esta vacio o tiene otro valor. Este es el cambio de compatibilidad explicito en la spec; las credenciales invalidas con un cliente valido siguen respondiendo `401 Unauthorized`.
