@@ -16,8 +16,13 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
 public class AuthResource {
+    private static final String ALLOWED_CLIENT = "angular-workshop";
+
     @Inject
     LegacyDatabase database;
+
+    @Inject
+    TokenService tokenService;
 
     @POST
     @Path("/login")
@@ -25,6 +30,8 @@ public class AuthResource {
         try {
             if (request == null) {
                 return Response.status(400).entity(Map.of("message", "Request is null")).build();
+            } else if (!ALLOWED_CLIENT.equals(request.client)) {
+                return Response.status(400).entity(Map.of("message", "Invalid client")).build();
             } else {
                 if (request.username == null || request.username.trim().isEmpty()) {
                     return Response.status(400).entity(Map.of("message", "Username is required")).build();
@@ -36,10 +43,10 @@ public class AuthResource {
                         if (user == null) {
                             return Response.status(401).entity(Map.of("message", "Invalid user " + request.username + " or password")).build();
                         } else {
-                            String token = LegacyTokenUtil.create(user.username(), user.role());
+                            TokenService.IssuedToken issuedToken = tokenService.issueToken(user.username(), request.client);
                             Map<String, Object> response = new HashMap<>();
-                            response.put("token", token);
-                            response.put("expiresIn", 3600);
+                            response.put("token", issuedToken.value());
+                            response.put("expiresIn", issuedToken.expiresIn());
                             response.put("user", Map.of(
                                     "username", user.username(),
                                     "displayName", StringEscapeUtils.escapeHtml4(user.displayName()),
