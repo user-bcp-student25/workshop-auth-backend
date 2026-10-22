@@ -1,19 +1,21 @@
 # Pruebas — workshop-auth-backend
 
-Matriz basada únicamente en el contrato actual de [ENDPOINTS.md](ENDPOINTS.md). Los cambios futuros descritos allí para el Issue #11 no se tratan como comportamiento ya implementado.
+Matriz basada únicamente en el contrato implementado y documentado en [ENDPOINTS.md](ENDPOINTS.md), incluidos los cambios aprobados para el Issue #11.
 
 ## Matriz de pruebas
 
 | endpoint | caso | tipo | resultado esperado |
 |---|---|---|---|
-| `POST /auth/login` | `student` con credenciales válidas y cliente informado | Feliz | `200`; token opaco no nulo, `expiresIn=3600`, `user.username/displayName/role` y `debug` conservados |
-| `POST /auth/login` | Cliente omitido | Borde | `200`; el cliente es opcional en la línea base actual |
+| `POST /auth/login` | `student` con credenciales válidas y `client=angular-workshop` | Feliz | `200`; JWT opaco con `sub`, `client`, `iat`, `exp`; `expiresIn` coherente dentro de 1 segundo; campos existentes de `user` y `debug` |
+| `POST /auth/login` | Cliente omitido, vacío o no permitido | Borde/Error | `400`; no emite token |
 | `POST /auth/login` | Campo JSON desconocido | Borde | `200`; el campo se ignora |
 | `POST /auth/login` | Solicitud JSON `null` | Error | `400`; `message` es `Request is null` |
 | `POST /auth/login` | `username` ausente o vacío | Error | `400`; `message` es `Username is required` |
 | `POST /auth/login` | `password` ausente o vacío | Error | `400`; `message` es `Password is required` |
 | `POST /auth/login` | Contraseña incorrecta | Error | `401`; incluye `message` y no emite `token` |
-| `POST /auth/login` | Tautología SQL en contraseña | Error | Contrato esperado `401`, sin token; **actualmente falla**: responde `200` |
+| `POST /auth/login` | Tautología SQL en contraseña | Error/Regresión | `401`, mensaje de credenciales inválidas y sin token; pasa con `PreparedStatement` |
+| `POST /auth/login` | Token con firma alterada | Error | El validador interno rechaza la firma |
+| Validación interna del token | `exp` igual o anterior a `now` | Error | El token se rechaza como expirado; no se agrega endpoint |
 | `POST /auth/login` | Excepción durante la consulta de credenciales (doble test-only) | Error | `500`; incluye un campo `message` |
 | `GET /q/health` | Servicio disponible | Feliz | `200`; `status=UP` |
 | `GET /q/health` | Sin checks de salud propios de la aplicación | Borde | `200`; `checks` está vacío |
@@ -21,7 +23,7 @@ Matriz basada únicamente en el contrato actual de [ENDPOINTS.md](ENDPOINTS.md).
 
 ## Código de los tests
 
-Fuentes: [AuthResourceTest.java](../src/test/java/com/bcp/workshop/auth/AuthResourceTest.java), [HealthEndpointTest.java](../src/test/java/com/bcp/workshop/auth/HealthEndpointTest.java), [AuthResourceFailureTest.java](../src/test/java/com/bcp/workshop/auth/AuthResourceFailureTest.java) y [LoginFailureTestProfile.java](../src/test/java/com/bcp/workshop/auth/LoginFailureTestProfile.java).
+Fuentes: [AuthResourceTest.java](../src/test/java/com/bcp/workshop/auth/AuthResourceTest.java), [TokenServiceTest.java](../src/test/java/com/bcp/workshop/auth/TokenServiceTest.java), [AuthResourceLogTest.java](../src/test/java/com/bcp/workshop/auth/AuthResourceLogTest.java), [SqlTautologyRegressionTest.java](../src/test/java/com/bcp/workshop/auth/SqlTautologyRegressionTest.java), [HealthEndpointTest.java](../src/test/java/com/bcp/workshop/auth/HealthEndpointTest.java), [AuthResourceFailureTest.java](../src/test/java/com/bcp/workshop/auth/AuthResourceFailureTest.java) y [LoginFailureTestProfile.java](../src/test/java/com/bcp/workshop/auth/LoginFailureTestProfile.java).
 
 ### AuthResourceTest
 
@@ -31,10 +33,18 @@ package com.bcp.workshop.auth;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import com.auth0.jwt.JWT;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import java.time.Instant;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.nullValue;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class AuthResourceTest {
@@ -47,7 +57,7 @@ class AuthResourceTest {
 				.then()
 				.statusCode(200)
 				.body("token", notNullValue())
-				.body("expiresIn", is(3600))
+				.body("expiresIn", anyOf(is(3599), is(3600)))
 				.body("user.username", is("student"))
 				.body("user.displayName", is("Workshop Student"))
 				.body("user.role", is("STUDENT"))
@@ -55,14 +65,58 @@ class AuthResourceTest {
 	}
 
 	@Test
-	void acceptsLoginWithoutClientAsCurrentBehavior() {
+	void loginTokenContainsIdentityClaimsAndMatchingExpiration() {
+		io.restassured.response.Response response = given()
+				.contentType("application/json")
+				.body("{\"username\":\"student\",\"password\":\"Workshop123!\",\"client\":\"angular-workshop\"}")
+				.when().post("/auth/login")
+				.then()
+				.statusCode(200)
+				.extract()
+				.response();
+
+		DecodedJWT token = JWT.decode(response.jsonPath().getString("token"));
+		long now = Instant.now().getEpochSecond();
+		long remainingSeconds = token.getExpiresAt().toInstant().getEpochSecond() - now;
+
+		assertEquals("student", token.getSubject());
+		assertEquals("angular-workshop", token.getClaim("client").asString());
+		assertNotNull(token.getIssuedAt());
+		assertNotNull(token.getExpiresAt());
+		assertTrue(Math.abs(response.jsonPath().getInt("expiresIn") - remainingSeconds) <= 1);
+	}
+
+	@Test
+	void rejectsMissingClient() {
 		given()
 				.contentType("application/json")
 				.body("{\"username\":\"student\",\"password\":\"Workshop123!\"}")
 				.when().post("/auth/login")
 				.then()
-				.statusCode(200)
-				.body("token", notNullValue());
+				.statusCode(400)
+				.body("token", nullValue());
+	}
+
+	@Test
+	void rejectsEmptyClient() {
+		given()
+				.contentType("application/json")
+				.body("{\"username\":\"student\",\"password\":\"Workshop123!\",\"client\":\"\"}")
+				.when().post("/auth/login")
+				.then()
+				.statusCode(400)
+				.body("token", nullValue());
+	}
+
+	@Test
+	void rejectsUnlistedClient() {
+		given()
+				.contentType("application/json")
+				.body("{\"username\":\"student\",\"password\":\"Workshop123!\",\"client\":\"unknown-client\"}")
+				.when().post("/auth/login")
+				.then()
+				.statusCode(400)
+				.body("token", nullValue());
 	}
 
 	@Test
@@ -142,7 +196,23 @@ class AuthResourceTest {
 				.body("message", is("Invalid user student or password"))
 				.body("token", nullValue());
 	}
+}
+```
 
+### SqlTautologyRegressionTest
+
+```java
+package com.bcp.workshop.auth;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
+
+@QuarkusTest
+class SqlTautologyRegressionTest {
 	@Test
 	void rejectsSqlTautologyAsInvalidCredentials() {
 		given()
@@ -216,7 +286,7 @@ class AuthResourceFailureTest {
 	void returnsDocumented500WhenLoginFlowThrows() {
 		given()
 				.contentType("application/json")
-				.body(Map.of("username", "student", "password", "Workshop123!"))
+				.body(Map.of("username", "student", "password", "Workshop123!", "client", "angular-workshop"))
 				.when().post("/auth/login")
 				.then()
 				.statusCode(500)
@@ -255,22 +325,20 @@ Directorio de ejecución: raíz del repositorio (`workshop-auth-backend/`). El i
 
 | comando | código de salida | resultado |
 |---|---:|---|
-| `mvn test "-Dtest=AuthResourceTest#ignoresUnknownRequestFields"` | 0 | 1 test, 0 fallos, 0 errores |
-| `mvn test -Dtest=AuthResourceFailureTest` | 0 | 1 test, 0 fallos, 0 errores |
-| `mvn test -Dtest=AuthResourceTest` | 1 | 10 tests; falla el caso SQL-tautology: esperaba `401`, recibió `200` |
-| `mvn verify` | 1 | 13 tests; 1 fallo (SQL-tautology), 0 errores; los demás pasan |
-| `mvn jacoco:report` | 0 | reporte generado a partir de `target/jacoco.exec` |
+| `mvn test -Dtest=SqlTautologyRegressionTest` | 0 | 1 test, H-03 devuelve `401` y no emite token |
+| `mvn test "-Dtest=AuthResourceTest,TokenServiceTest,AuthResourceLogTest,AuthResourceFailureTest,HealthEndpointTest"` | 0 | 22 tests, 0 fallos, 0 errores |
+| `mvn verify` | 0 | 23 tests, 0 fallos, 0 errores; `BUILD SUCCESS` |
+| `mvn jacoco:report` | 0 | reporte generado en `target/site/jacoco/index.html` |
 
-Medición JaCoCo 0.8.12, cobertura de instrucciones sobre clases de producción: `AuthResource` 127/129 (98.4%); `LegacyDatabase` 91/94 (96.8%); bundle 252/257 (98.1%). Ramas del bundle: 17/20 (85%). No se modificó código de producción; la meta de `REGLAS.md` (85% del código modificado) queda superada para las clases ejercitadas. El entorno usa JDK 25 y JaCoCo 0.8.12 imprime avisos de instrumentación de clases del JDK; esto no altera los resultados de pruebas reportados.
+Medición JaCoCo 0.8.12: `AuthResource` 144/146 instrucciones (98.6%), `TokenService` 96/111 (86.5%), `LegacyDatabase` 97/100 (97.0%), bundle 364/384 (94.8%). La cobertura de instrucciones de las clases modificadas supera la meta de 85% de `REGLAS.md`. El entorno usa Temurin JDK 21; JaCoCo imprime avisos de instrumentación de algunas clases del JDK, pero `mvn verify` termina en `BUILD SUCCESS`.
 
 ## Fallos
 
-- **H-03, inyección SQL (issue #22):** `rejectsSqlTautologyAsInvalidCredentials` recibe `200` y un token en lugar de `401`. No se deshabilitó ni adaptó la expectativa; no se modificó producción.
+- **H-03, inyección SQL (issue #22):** corregida mediante parámetros enlazados; `SqlTautologyRegressionTest` confirma `401` y ausencia de token.
 - **H-07, detalle en respuesta 500:** el contrato actual documenta el campo `exception`, pero se trata como exposición heredada no recomendada. El test verifica `500` y que exista `message`, sin fijar la clase de excepción como contrato.
 
 ## Pendientes
 
-- Corregir H-03 en un cambio de implementación aprobado y volver a ejecutar `mvn verify`; hasta entonces el comando integral termina con código 1.
 - ENDPOINTS no define respuestas de error para `GET /q/health`; no se agregó una prueba de error inventada.
 
 ## Pruebas propuestas
